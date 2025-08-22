@@ -23,7 +23,7 @@ import tiktoken
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from concept_mapper import map_to_concept
+from backend.concept_mapper import map_to_concept
 # Your intelligent imports - UPDATED for new LangChain
 from PyPDF2 import PdfReader
 from langchain_community.vectorstores import FAISS
