@@ -34,7 +34,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import docx2txt
 
-from semantic_graph_builder import build_reasoning_trace
+from backend.semantic_graph_builder import build_reasoning_trace
 load_dotenv()
 
 # Rate limiting

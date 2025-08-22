@@ -1,6 +1,6 @@
 import re
 from typing import List, Dict, Any
-from concept_mapper import map_to_concept
+from backend.concept_mapper import map_to_concept
 
 
 def split_speakers(transcript: str) -> List[Dict[str, str]]:

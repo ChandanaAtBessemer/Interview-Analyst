@@ -1,6 +1,6 @@
 import fitz  # PyMuPDF
 import sys
-from semantic_graph_builder import build_reasoning_trace
+from backend.semantic_graph_builder import build_reasoning_trace
 
 def extract_text_from_pdf(path: str) -> str:
     doc = fitz.open(path)
