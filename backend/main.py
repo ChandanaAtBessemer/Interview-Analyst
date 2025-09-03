@@ -1824,6 +1824,149 @@ def health_check():
         "auth_enabled": ENABLE_AUTH
     }
 
+# SECTION 1: Memory-Safe Variables
+@app.post("/api/upload")
+@limiter.limit("10/minute")
+async def upload_file(request: Request, file: UploadFile = File(...)):
+    """Enhanced file upload with aggressive memory cleanup"""
+    
+    # Initialize variables to None so we can safely clean them up later
+    content = None          # Will hold raw file bytes
+    script_content = ""     # Will hold extracted text
+    
+    try:
+        # SECTION 2: File Size Protection (NEW!)
+        content = await file.read()
+        MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB = 10 * 1024 * 1024 bytes
+        
+        # CRITICAL: Check size BEFORE processing (prevents crashes)
+        if len(content) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="File too large. Maximum size is 10MB.")
+        
+        # SECTION 3: Enhanced PDF Processing with Memory Cleanup
+        if file.filename.endswith('.pdf'):
+            try:
+                reader = PdfReader(BytesIO(content))
+                
+                # Process each page individually (more memory efficient)
+                for page_num, page in enumerate(reader.pages):
+                    try:
+                        if page_text := page.extract_text():
+                            script_content += page_text + "\n"
+                    except Exception as page_error:
+                        # Don't fail entire upload if one page fails
+                        logger.warning(f"Failed to extract text from page {page_num + 1}: {page_error}")
+                        continue
+                
+                # CRITICAL: Explicitly delete PDF reader from memory
+                del reader  # This frees up memory immediately!
+                
+            except Exception as pdf_error:
+                # Specific error handling for PDFs
+                logger.error(f"PDF processing failed: {pdf_error}")
+                raise HTTPException(status_code=400, detail=f"PDF processing failed: {str(pdf_error)}")
+        
+        # SECTION 4: Better Text File Encoding Handling
+        elif file.filename.endswith(('.txt', '.md')):
+            try:
+                script_content = content.decode('utf-8')
+            except UnicodeDecodeError:
+                # Try other common encodings if UTF-8 fails
+                for encoding in ['latin-1', 'cp1252', 'iso-8859-1']:
+                    try:
+                        script_content = content.decode(encoding)
+                        logger.info(f"Successfully decoded with {encoding}")
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                else:
+                    raise HTTPException(status_code=400, detail="Unable to decode text file")
+        
+        # SECTION 5: AGGRESSIVE CACHE CLEANUP (This fixes your multiple upload issue!)
+        file_id = cached_db.generate_file_id(script_content, file.filename)
+        
+        # Clear existing cache for this specific file
+        if file_id in vector_cache:
+            logger.info(f"Clearing existing cache for file_id: {file_id}")
+            del vector_cache[file_id]
+        
+        # CRITICAL: Limit total cache size (prevents memory buildup)
+        if len(vector_cache) > 3:  # Keep maximum 3 files in memory
+            # Sort by timestamp to find oldest entries
+            oldest_keys = sorted(
+                vector_cache.keys(), 
+                key=lambda k: vector_cache[k].get('timestamp', datetime.min)
+            )[:len(vector_cache)-2]  # Keep newest 2, remove the rest
+            
+            # Remove old cache entries
+            for old_key in oldest_keys:
+                logger.info(f"Removing old cache entry: {old_key}")
+                del vector_cache[old_key]
+        
+        # Return response (same as before)
+        return {
+            "content": script_content,
+            "filename": file.filename,
+            "size": len(script_content),
+            "file_id": file_id,
+            "tokens": cached_db.count_tokens(script_content),
+            "message": "File processed successfully"
+        }
+        
+    # SECTION 6: Better Error Handling
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
+    except Exception as e:
+        logger.error(f"File upload failed with unexpected error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"File processing failed: {str(e)}")
+    
+    # SECTION 7: CRITICAL - Always Clean Up Memory (finally block)
+    finally:
+        # This runs NO MATTER WHAT happens above (success or error)
+        
+        # Delete raw file content from memory
+        if content is not None:
+            del content  # Free the raw bytes
+        
+        # script_content is kept because it's returned in the response
+        # It will be cleaned up when the response is sent
+        
+        # Force Python's garbage collector to run
+        import gc
+        gc.collect()  # This frees up unused memory immediately
+        
+        # Log memory usage for monitoring
+        try:
+            import psutil
+            import os
+            process = psutil.Process(os.getpid())
+            memory_mb = process.memory_info().rss / 1024 / 1024  # Convert bytes to MB
+            logger.info(f"Memory usage after upload: {memory_mb:.1f}MB")
+            
+            # Alert if memory usage is high
+            if memory_mb > 300:  # More than 300MB
+                logger.warning(f"High memory usage detected: {memory_mb:.1f}MB")
+        except:
+            pass  # Don't fail if psutil isn't available
+
+
+# BONUS: Debug endpoint to manually clear cache
+@app.delete("/api/cache/clear")
+async def clear_cache_debug(request: Request):
+    """Clear cache for debugging multiple uploads"""
+    global vector_cache
+    cache_count = len(vector_cache)
+    vector_cache.clear()  # Remove all cached data
+    
+    # Force garbage collection
+    import gc
+    gc.collect()
+    
+    return {
+        "message": f"Cleared {cache_count} cache entries", 
+        "remaining": len(vector_cache)
+    }
+'''
 @app.post("/api/upload")
 @limiter.limit("10/minute")
 async def upload_file(request: Request, file: UploadFile = File(...)):
@@ -1868,7 +2011,7 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"File upload failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
+'''
 @app.post("/api/process", response_model=ProcessResponse)
 @limiter.limit("20/minute")
 async def process_interview(request: Request, data: ProcessRequest):
