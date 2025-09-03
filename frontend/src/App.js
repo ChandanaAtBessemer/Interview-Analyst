@@ -645,7 +645,7 @@ const InterviewQA = () => {
                   Choose your interview file
                 </h3>
                 <p className="text-gray-600 mb-6">
-                  Upload PDF, DOCX, TXT, or MD files<br/>
+                  Upload PDF files<br/>
                   Support for any interview type: hiring, surveys, research, etc.
                 </p>
                 <button 
