@@ -51,6 +51,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def session_cleanup_middleware(request: Request, call_next):
+    """Detect new sessions and clean up memory"""
+    
+    response = await call_next(request)
+    
+    # If this is a new session (no file_id in recent requests), clean up aggressively
+    if request.url.path == "/api/upload":
+        try:
+            import psutil
+            import os
+            process = psutil.Process(os.getpid())
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            
+            logger.info(f"Upload request memory check: {memory_mb:.1f}MB")
+            
+            # If memory is high before upload, clean cache aggressively
+            if memory_mb > 200:  # 200MB threshold
+                logger.warning(f"Pre-upload memory high ({memory_mb:.1f}MB), cleaning cache...")
+                
+                # Clear most cache, keeping only most recent entry
+                if len(vector_cache) > 1:
+                    # Keep only the most recently accessed cache
+                    most_recent = max(vector_cache.items(), 
+                                    key=lambda x: x[1].get('timestamp', datetime.min))
+                    vector_cache.clear()
+                    vector_cache[most_recent[0]] = most_recent[1]
+                    
+                    import gc
+                    gc.collect()
+                    
+                    memory_after = process.memory_info().rss / 1024 / 1024
+                    logger.info(f"Memory after pre-upload cleanup: {memory_after:.1f}MB")
+        except:
+            pass
+    
+    return response
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -2033,7 +2072,7 @@ async def process_interview(request: Request, data: ProcessRequest):
     except Exception as e:
         logger.error(f"Processing failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
+'''
 @app.post("/api/query", response_model=QueryResponse)
 @limiter.limit("30/minute")
 async def query_interview(request: Request, data: QueryRequest, token: str = Depends(verify_token)):
@@ -2069,42 +2108,80 @@ async def query_interview(request: Request, data: QueryRequest, token: str = Dep
         logger.error(f"Query failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 '''
-@app.post("/api/query_enhanced")
+@app.post("/api/query", response_model=QueryResponse)
 @limiter.limit("30/minute")
-async def query_interview_enhanced(request: Request, data: QueryRequest, token: str = Depends(verify_token)):
-    """Enhanced query endpoint that returns reasoning trace"""
+async def query_interview(request: Request, data: QueryRequest, token: str = Depends(verify_token)):
+    """Enhanced query with POST-PROCESSING memory cleanup"""
     
     try:
-        logger.info(f"Processing enhanced query: {data.question}")
+        logger.info(f"Processing query: {data.question}")
         
-        file_id = data.file_id or enhanced_cached_db.generate_file_id(data.script)
+        file_id = data.file_id or cached_db.generate_file_id(data.script)
         
         # Use cached vector DB or build new one
         if file_id in vector_cache:
             cache_data = vector_cache[file_id]
             db, speakers, chunks = cache_data['db'], cache_data['speakers'], cache_data['chunks']
         else:
-            db, speakers, chunks = enhanced_cached_db.build_vector_db(data.script, file_id)
+            db, speakers, chunks = cached_db.build_vector_db(data.script, file_id)
         
-        # Query with reasoning trace
-        answer, docs_used, tokens_used, reasoning_trace = enhanced_cached_db.query_with_reasoning_trace(
-            db, speakers, data.question
+        # Query with token management
+        answer, docs_used, tokens_used, reasoning_steps = cached_db.query_with_metadata(
+            db, speakers, data.question, file_id=file_id
         )
         
-        return {
-            "question": data.question,
-            "answer": answer,
-            "speakers_detected": speakers,
-            "chunks_used": len(docs_used),
-            "tokens_used": tokens_used,
-            "file_id": file_id,
-            "reasoning_trace": asdict(reasoning_trace) if reasoning_trace else None,
-            "enhanced": True
-        }
+        response = QueryResponse(
+            question=data.question,
+            answer=answer,
+            speakers_detected=speakers,
+            chunks_used=len(docs_used),
+            tokens_used=tokens_used,
+            file_id=file_id,
+            reasoning=reasoning_steps
+        )
+        
+        # 🆕 CRITICAL: Clean up after query processing
+        import gc
+        
+        # Check memory usage and clean up if high
+        try:
+            import psutil
+            import os
+            process = psutil.Process(os.getpid())
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            logger.info(f"Memory after query: {memory_mb:.1f}MB")
+            
+            # If memory is high, aggressively clean cache
+            if memory_mb > 250:  # More than 250MB
+                logger.warning(f"High memory usage ({memory_mb:.1f}MB), cleaning cache...")
+                
+                # Keep only the current file_id, remove others
+                current_cache = {file_id: vector_cache[file_id]} if file_id in vector_cache else {}
+                vector_cache.clear()
+                vector_cache.update(current_cache)
+                
+                # Force garbage collection
+                gc.collect()
+                
+                # Check memory again
+                memory_after = process.memory_info().rss / 1024 / 1024
+                logger.info(f"Memory after cleanup: {memory_after:.1f}MB (saved {memory_mb - memory_after:.1f}MB)")
+        
+        except Exception as mem_error:
+            logger.warning(f"Memory monitoring failed: {mem_error}")
+        
+        # Always force garbage collection after queries
+        gc.collect()
+        
+        return response
         
     except Exception as e:
-        logger.error(f"Enhanced query failed: {e}")
+        logger.error(f"Query failed: {e}")
+        # Clean up on error too
+        import gc
+        gc.collect()
         raise HTTPException(status_code=500, detail=str(e))
+
 '''
 @app.post("/api/query_enhanced")
 @limiter.limit("30/minute")
@@ -2188,7 +2265,118 @@ async def query_interview_enhanced(request: Request, data: QueryRequest, token: 
     except Exception as e:
         logger.error(f"Enhanced query failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+'''
+@app.post("/api/query_enhanced")
+@limiter.limit("30/minute")
+async def query_interview_enhanced(request: Request, data: QueryRequest, token: str = Depends(verify_token)):
+    """Enhanced query with AGGRESSIVE post-processing cleanup"""
+    try:
+        logger.info(f"Processing enhanced query: {data.question}")
 
+        file_id = data.file_id or enhanced_cached_db.generate_file_id(data.script)
+
+        if file_id in vector_cache:
+            cache_data = vector_cache[file_id]
+            db, speakers, chunks = cache_data['db'], cache_data['speakers'], cache_data['chunks']
+        else:
+            db, speakers, chunks = enhanced_cached_db.build_vector_db(data.script, file_id)
+
+        answer, docs_used, tokens_used, legacy_reasoning_trace = enhanced_cached_db.query_with_reasoning_trace(
+            db, speakers, data.question, file_id=file_id
+        )
+
+        # Build generalized trace (existing code)
+        generalized_trace = None
+        try:
+            from backend.semantic_graph_builder import build_reasoning_trace
+            from backend.concept_mapper import map_to_concept
+            
+            full_semantic_trace = build_reasoning_trace(data.script)
+            q_concept, q_score = map_to_concept(data.question)
+            focused_concepts = {q_concept.lower()}
+            
+            cm_step = next((s for s in full_semantic_trace["steps"] if s.get("step_id") == "concept_mapping"), None)
+            if cm_step:
+                for concept in cm_step["details"].get("detailed_mapping", {}).keys():
+                    if concept.lower() in (data.question or "").lower():
+                        focused_concepts.add(concept.lower())
+                
+                filtered_mapping = {
+                    c: v for c, v in cm_step["details"]["detailed_mapping"].items()
+                    if c.lower() in focused_concepts
+                }
+                
+                steps_out = []
+                if filtered_mapping:
+                    cm_copy = dict(cm_step)
+                    cm_copy["details"] = dict(cm_step["details"])
+                    cm_copy["details"]["detailed_mapping"] = filtered_mapping
+                    steps_out.append(cm_copy)
+                
+                spk_step = next((s for s in full_semantic_trace["steps"] if s.get("step_id") == "speaker_analysis"), None)
+                if spk_step:
+                    steps_out.append(spk_step)
+                
+                generalized_trace = {"steps": steps_out or full_semantic_trace["steps"]}
+            else:
+                generalized_trace = full_semantic_trace
+        except Exception as gerr:
+            logger.warning(f"Generalized trace failed (non-blocking): {gerr}")
+            generalized_trace = None
+
+        response_data = {
+            "question": data.question,
+            "answer": answer,
+            "speakers_detected": speakers,
+            "chunks_used": len(docs_used),
+            "tokens_used": tokens_used,
+            "file_id": file_id,
+            "reasoning_trace": asdict(legacy_reasoning_trace) if legacy_reasoning_trace else None,
+            "generalized_reasoning_trace": generalized_trace,
+            "enhanced": True
+        }
+
+        # CRITICAL: AGGRESSIVE POST-QUERY CLEANUP
+        import gc
+        
+        try:
+            import psutil
+            import os
+            process = psutil.Process(os.getpid())
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            logger.info(f"Memory after enhanced query: {memory_mb:.1f}MB")
+            
+            # Much more aggressive cleanup for enhanced queries
+            if memory_mb > 200:  # Lower threshold for enhanced queries
+                logger.warning(f"High memory usage ({memory_mb:.1f}MB) after enhanced query, aggressive cleanup...")
+                
+                # Clear ALL cache except current file
+                current_cache = {file_id: vector_cache[file_id]} if file_id in vector_cache else {}
+                vector_cache.clear()
+                if current_cache:
+                    vector_cache.update(current_cache)
+                
+                # Multiple garbage collection passes
+                for i in range(3):
+                    gc.collect()
+                    time.sleep(0.1)
+                
+                memory_after = process.memory_info().rss / 1024 / 1024
+                logger.info(f"Memory after aggressive cleanup: {memory_after:.1f}MB")
+        except:
+            pass
+        
+        # Always do garbage collection
+        gc.collect()
+        
+        return response_data
+
+    except Exception as e:
+        logger.error(f"Enhanced query failed: {e}")
+        # Cleanup on error
+        import gc
+        gc.collect()
+        raise HTTPException(status_code=500, detail=str(e))
 @app.post("/api/validate", response_model=ValidationResponse)
 @limiter.limit("20/minute")
 async def validate_answer(request: Request, data: ValidationRequest, token: str = Depends(verify_token)):
@@ -2273,7 +2461,32 @@ async def process_generalized_endpoint(data: dict):
         resp["file_id"] = incoming_file_id
     return resp
 
+@app.post("/api/session/reset")
+async def reset_session():
+    """Reset session - call this when starting fresh uploads"""
+    global vector_cache
     
+    cache_count = len(vector_cache)
+    vector_cache.clear()
+    
+    # Aggressive cleanup
+    import gc
+    for i in range(3):
+        gc.collect()
+        time.sleep(0.1)
+    
+    try:
+        import psutil
+        import os
+        process = psutil.Process(os.getpid())
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        logger.info(f"Memory after session reset: {memory_mb:.1f}MB")
+        return {
+            "message": f"Session reset complete. Cleared {cache_count} cache entries.",
+            "memory_mb": memory_mb
+        }
+    except:
+        return {"message": f"Session reset complete. Cleared {cache_count} cache entries."}   
 
 if __name__ == "__main__":
     import uvicorn
