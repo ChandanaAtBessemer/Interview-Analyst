@@ -349,7 +349,7 @@ const InterviewQA = () => {
     formData.append('file', file);
 
     try {
-      const response = await fetch('http://localhost:8000/api/upload', {
+      const response = await fetch('https://interview-analyst.onrender.com/api/upload', {
         method: 'POST',
         body: formData
       });
@@ -382,7 +382,8 @@ const InterviewQA = () => {
       // Check for speaker patterns
       const speakerMatches = content.match(/(Interviewer|Interviewee[^:]*?):/g);
       console.log('🔍 Speaker patterns found:', speakerMatches);
-      const response = await fetch('http://localhost:8000/api/process_generalized', {
+      //const response = await fetch('http://localhost:8000/api/process_generalized', {
+      const response = await fetch('https://interview-analyst.onrender.com/api/process_generalized',{
       //const response = await fetch('http://localhost:8000/api/process_generalized', {
         method: 'POST',
         headers: { 
@@ -493,7 +494,7 @@ const InterviewQA = () => {
   
     try {
       const endpoint = useEnhanced ? '/api/query_enhanced' : '/api/query';
-      const response = await fetch(`http://localhost:8000${endpoint}`, {
+      const response = await fetch(`https://interview-analyst.onrender.com${endpoint}`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -546,7 +547,7 @@ const InterviewQA = () => {
     setIsValidating(true);
 
     try {
-      const response = await fetch('http://localhost:8000/api/validate', {
+      const response = await fetch('https://interview-analyst.onrender.com/api/validate', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
