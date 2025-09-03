@@ -1806,6 +1806,7 @@ def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(s
     return credentials.credentials if credentials else None
 
 @app.get("/")
+@app.head("/")
 def read_root():
     return {
         "message": "Fixed Production Interview Q&A API", 
@@ -1814,6 +1815,7 @@ def read_root():
     }
 
 @app.get("/health")
+@app.head("/health")
 def health_check():
     return {
         "status": "healthy", 
